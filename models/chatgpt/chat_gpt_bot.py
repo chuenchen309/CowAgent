@@ -28,6 +28,16 @@ from common.token_bucket import TokenBucket
 from config import conf, load_config
 from models.baidu.baidu_wenxin_session import BaiduWenxinSession
 
+
+def _estimate_completion_tokens(text: str) -> int:
+    """Rough output size for a reply whose gateway reported no `usage`.
+
+    Only used to keep such a reply out of the error path, never preferred over
+    a reported count.
+    """
+    return max(1, len(text) // 2)
+
+
 # OpenAI对话模型API (可用)
 class ChatGPTBot(Bot, OpenAIImage, OpenAICompatibleBot):
     def __init__(self, bot_type=None):
@@ -332,14 +342,22 @@ class ChatGPTBot(Bot, OpenAIImage, OpenAICompatibleBot):
                     messages=session.messages,
                     **call_args,
                 )
-            logger.info("[ChatGPT] reply={}, total_tokens={}".format(
-                response["choices"][0]["message"]["content"],
-                response["usage"]["total_tokens"]
-            ))
+            content = response["choices"][0]["message"]["content"]
+            # A relay or OpenAI-compatible gateway behind open_ai_api_base may
+            # leave out `usage`. reply() reads completion_tokens == 0 as an
+            # error, so an unreported count is estimated rather than left at 0.
+            usage = response.get("usage")
+            usage = usage if isinstance(usage, dict) else {}
+            total_tokens = usage.get("total_tokens") or 0
+            completion_tokens = usage.get("completion_tokens") or 0
+            if content and not completion_tokens:
+                completion_tokens = _estimate_completion_tokens(content)
+                total_tokens = total_tokens or completion_tokens
+            logger.info("[ChatGPT] reply={}, total_tokens={}".format(content, total_tokens))
             return {
-                "total_tokens": response["usage"]["total_tokens"],
-                "completion_tokens": response["usage"]["completion_tokens"],
-                "content": response["choices"][0]["message"]["content"],
+                "total_tokens": total_tokens,
+                "completion_tokens": completion_tokens,
+                "content": content,
             }
         except OpenAIHTTPError as http_err:
             return self._handle_reply_error(
